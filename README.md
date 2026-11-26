@@ -4,16 +4,20 @@ CoolPlant runs an hourly, full-year (8,760 h) energy and water model of a water-
 
 > **This is an educational model.** It uses textbook relationships and stated assumptions. It has **not** been validated against a real facility, and its absolute numbers should not be used for design.
 
-![CoolPlant screenshot](docs/screenshot.png)
-<!-- TODO: replace with a screenshot or GIF of the running app -->
+**Live demo:** https://shuhamcj.github.io/coolplant/
 
-## Status
+![CoolPlant: summary cards, plant mode timeline, selected-hour readout and animated plant schematic for Ashburn, VA](docs/screenshot.png)
+
+## Status: complete
 
 | Phase | Scope | State |
 |---|---|---|
 | 1 | One city (Ashburn, VA), plant model, baseline vs smart, charts, unit tests | Done |
 | 2 | All five cities (Ashburn, Phoenix, Council Bluffs, Dublin, Singapore) + city comparison view | Done |
 | 3 | Heatwave stress test + animated plant schematic | Done |
+| 3 follow-ups | Chiller trip above 40 °C ECWT, "N+1 unit out of service" option, CHW supply and server-inlet rise when capacity is short, dry-bulb-only heatwave at constant humidity ratio, shared 0.05 K tolerance for hour counts | Done |
+
+38 Vitest unit tests cover the engineering math; CI runs them before every deploy.
 
 ## How the model works
 
@@ -74,12 +78,21 @@ Because a + b + c = 1, the curve gives rated full-load power at PLR = 1, and the
 
 Capacity derates by 1.5 % per K of ECWT above 29.4 °C. Chiller ECWT has a head-pressure floor of 15.5 °C.
 
+**Trip (assumed).** Above 40 °C ECWT (≈ 104 °F), every chiller trips on high head pressure and plant chiller capacity drops to zero. All units see the same condenser water, so this is a common-cause trip. Restart delays and staged unloading before a trip are not modelled.
+
 **Staging:**
 
 - **Baseline:** run the fewest chillers that carry the load: n = ceil(load / Cap).
 - **Smart:** try every n from that minimum up to an allowed maximum, and run the n with the lowest chiller kW. The **keep one chiller on standby** toggle (default on) sets that maximum to N, so the N+1 unit starts only when the load cannot be carried without it. With the toggle off, the maximum is N+1. Running all units near their best PLR saves a little energy but spends redundancy, and the model does not price that risk.
 
-If load exceeds installed capacity, the shortfall is reported as unmet load.
+If load exceeds the capacity of the chillers in service, the shortfall at setpoint is reported as unmet load, and CHW supply temperature rises:
+
+```
+Chillers running:   CHWS_actual = CHWS + (unmet / capacity_running) / 0.03 K⁻¹
+No chillers running: CHWS_actual = CHWS + ΔT_chw · unmet / Q_cool          (lower bound)
+```
+
+With chillers running, the loop warms until their capacity meets the load. The model assumes capacity rises 3 % per K of leaving CHW temperature. With every chiller tripped there is no equilibrium. The model then reports the steady-state lower bound (supply ≈ return), but a real loop would keep heating within minutes. Supply air / server inlet is taken as CHWS_actual + 7 K and compared with the 27 °C ASHRAE TC 9.9 recommended limit.
 
 ### 4. Cooling tower
 
@@ -187,15 +200,35 @@ Check current eGRID or national inventory values before quoting these.
 
 ### 9. Heatwave test
 
-The heatwave adds +X °C (1–12) to both dry-bulb and wet-bulb for N days (1–14) from a chosen start day. It applies to the selected city only; the comparison table stays on normal weather. For the same window, with and without the heatwave, the app reports:
+The heatwave adds +X °C (1–12) to **dry-bulb only** for N days (1–14) from a chosen start day. The humidity ratio is held constant (assumed). At constant pressure that means constant vapour pressure, so:
 
-- **Plant capacity exceeded:** hours where chiller load exceeds the derated capacity of all N+1 units, and the maximum unmet load.
-- **CHW supply above setpoint:** the actual supply temperature is CHWS + ΔT_chw · unmet / Q_cool. The app reports hours above setpoint and the peak.
-- **Peak chiller loading:** chiller load as a share of derated N+1 capacity, plus peak PLR and chillers on.
+```
+p_v   = RH/100 · p_sat(DB)
+DB'   = DB + X
+RH'   = 100 · p_v / p_sat(DB')
+WB'   = Stull(DB', RH')
+```
+
+Wet-bulb therefore rises much less than X. For Ashburn in July, +8 °C dry-bulb raises the peak wet-bulb from 25.7 to 28.1 °C. The hour panel shows the adjusted dry-bulb, RH and wet-bulb during the window.
+
+**N+1 unit out of service** (option, default off) removes one chiller for the heatwave window only. The heatwave applies to the selected city only; the comparison table stays on normal weather. For the same window, with and without the heatwave, the app reports:
+
+- **Plant capacity exceeded:** hours where chiller load exceeds the derated capacity in service, and the maximum unmet load.
+- **CHW supply above setpoint:** hours where supply runs more than 0.05 K above setpoint (section 3), and the peak supply temperature.
+- **Peak supply air / server inlet:** CHW supply + 7 K, compared with the 27 °C ASHRAE limit, plus the hours above it. Both hour counts use the same 0.05 K tolerance, so with Smart CHWS + 7 K = 27 °C they match.
+- **Peak chiller loading:** chiller load as a share of the derated capacity in service, plus peak PLR and chillers on.
 - **Hours standby chiller needed:** hours where the load needs more than N chillers, so the plant is running without redundancy.
-- **Hours ECWT > 40 °C:** a flag only. The model has no high-head-pressure trip, so it keeps running chillers there.
+- **Peak ECWT and hours tripped:** hours where ECWT exceeded 40 °C and the chillers tripped.
 
-Wet-bulb + X can be physically implausible at large X, because a +12 °C wet-bulb shift is far outside any recorded heatwave. Treat large X as a stress test, not a forecast. For Ashburn at a flat 10 MW, derated N+1 capacity covers even large heatwaves, but the standby chiller is needed in most hours from about +5 °C. Heatwave and AI spikes together can exceed capacity.
+Results for Ashburn, 10 MW flat load, 7 days from 15 July:
+
+| Case | Capacity exceeded | Peak CHW supply | Server inlet > 27 °C |
+|---|---|---|---|
+| +8 °C, all units | 0 h | at setpoint | 0 h |
+| +8 °C, N+1 unit out | 3–4 h | Smart 20.15 °C | Smart 3 h |
+| +12 °C, N+1 unit out | 33–34 h | Smart 20.71 °C | Smart 33 h |
+
+Baseline's 7 °C supply leaves a large inlet margin, so it stays under 27 °C. Smart's 20 °C setpoint has no margin, so any shortfall breaches the limit. The 40 °C trip does not fire for real weather with a constant humidity ratio: Ashburn's peak ECWT stays near 33 °C even at +12 °C. The trip is there for hotter or more humid sites and settings, and a unit test exercises it directly.
 
 ### 10. Plant schematic
 
@@ -203,14 +236,22 @@ An SVG schematic shows the towers, the CW pump, the plate HX, the N+1 chillers, 
 
 ## Default values
 
-Every default is in [`src/model/params.ts`](src/model/params.ts) with a label and a note, and the app renders the same table under **Every assumed number**.
+Every default is in [`src/model/params.ts`](src/model/params.ts) with a label and a note, and the app renders the same table under **Every assumed number**. Assumptions that are not single numbers are listed there too (`EXTRA_ASSUMPTIONS`):
+
+- the heatwave holds the humidity ratio constant;
+- the N+1 unit is out of service only during the heatwave window;
+- chillers trip together (common cause);
+- CHW supply when capacity is short follows the equilibrium rule in section 3;
+- supply air / server inlet = CHW supply + 7 K.
 
 ## Assumptions and limitations
 
 - **Not validated.** No comparison against metered plant data has been made.
 - **Steady state, hourly.** There is no thermal storage, no control dynamics, and no staging hysteresis or minimum run times.
 - **Plant only.** pPUE includes chillers, CHW/CW pumps and tower fans. It excludes CRAH and fan-wall fans, UPS and electrical losses, humidification, and lighting. Facility PUE would be higher.
-- **Chiller model.** It uses a Carnot fraction that falls at low lift, plus a generic part-load curve. It is not a manufacturer curve or a DOE-2/EnergyPlus EIR curve set. Capacity derates linearly with ECWT, and there is no high-head-pressure trip.
+- **Chiller model.** It uses a Carnot fraction that falls at low lift, plus a generic part-load curve. It is not a manufacturer curve or a DOE-2/EnergyPlus EIR curve set. Capacity derates linearly with ECWT, every chiller trips above 40 °C ECWT, and capacity is assumed to rise 3 %/K with CHW supply temperature. All three are assumptions.
+- **Capacity shortfall.** The supply-temperature rise is an hourly equilibrium estimate, not a transient. With every chiller tripped it is only a lower bound.
+- **Heatwave weather.** The heatwave shifts dry-bulb at a constant humidity ratio. Real heatwaves can also change humidity. Heatwave RH can fall below 5 %, where Stull's formula is clamped.
 - **Tower model.** Below its setpoint the tower holds a fixed 4 K approach, as specified. Real approach shrinks at part load and depends on airflow; with a fixed approach this model understates free-cooling hours at light load. The fan airflow scaling for a warm tower is an assumption, not a tower performance curve.
 - **Water.** Evaporation uses the air-side balance in section 8 and assumes leaving air is saturated at the mean water temperature. That assumption, the sea-level pressure and the 0.5–1.5 × Q_rej / h_fg clamp are all simplifications. Drift is ignored.
 - **IT load** is flat apart from the optional synthetic spikes. CHW pump heat is added to the load; CW pump heat, and heat gains through pipes and the building, are not.

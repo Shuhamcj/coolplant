@@ -1,11 +1,13 @@
 import type { Params } from './params';
 import { simulateHour, sizePlant, type HourResult, type PlantSize, type Strategy } from './plant';
-import { stullWetBulb } from './psychro';
+import { psatKPa, stullWetBulb } from './psychro';
 
 export const HOURS = 8760;
 const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 export const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 export const L_PER_GAL = 3.78541;
+/** Shared deadband for "above setpoint" / "above limit" temperature counts, K. */
+export const TEMP_TOL_K = 0.05;
 
 export interface Weather {
   tempC: number[];
@@ -68,12 +70,15 @@ export interface Heatwave {
   deltaC: number;
   days: number;
   startDay: number; // 0-based day of year
+  /** Take the N+1 standby chiller out of service for the heatwave window. */
+  unitOut?: boolean;
 }
 
 export interface AnnualResult {
   size: PlantSize;
   wbC: Float64Array;
   dbC: Float64Array;
+  rh: Float64Array;
   loadKW: Float64Array;
   baseline: StrategyRun;
   smart: StrategyRun;
@@ -83,7 +88,7 @@ export function wetBulbSeries(w: Weather): Float64Array {
   return Float64Array.from(w.tempC, (t, i) => stullWetBulb(t, w.rh[i]));
 }
 
-function runStrategy(strategy: Strategy, wbC: Float64Array, dbC: Float64Array, loadKW: Float64Array, p: Params, size: PlantSize, gridKg: number): StrategyRun {
+function runStrategy(strategy: Strategy, wbC: Float64Array, dbC: Float64Array, unitsOut: Uint8Array, loadKW: Float64Array, p: Params, size: PlantSize, gridKg: number): StrategyRun {
   const hours: HourResult[] = new Array(HOURS);
   const monthly = MONTHS.map(() => ({ mechMWh: 0, waterKGal: 0 }));
   const dailyIT = new Float64Array(365);
@@ -91,7 +96,7 @@ function runStrategy(strategy: Strategy, wbC: Float64Array, dbC: Float64Array, l
   const t: Totals = { itKWh: 0, mechKWh: 0, chillerKWh: 0, pumpKWh: 0, fanKWh: 0, waterGal: 0, co2Tonnes: 0, pPUE: 0, freeHours: 0, partialHours: 0, unmetHours: 0, copLimitHours: 0, peakPlr: 0 };
 
   for (let h = 0; h < HOURS; h++) {
-    const r = simulateHour(wbC[h], loadKW[h], strategy, p, size, dbC[h]);
+    const r = simulateHour(wbC[h], loadKW[h], strategy, p, size, dbC[h], unitsOut[h]);
     hours[h] = r;
     const gal = r.waterL / L_PER_GAL;
     t.itKWh += loadKW[h];
@@ -120,24 +125,31 @@ export const heatwaveHours = (hw: Heatwave) => [hw.startDay * 24, Math.min(HOURS
 
 export function simulateYear(w: Weather, p: Params, opts: { spikes: boolean; gridKgCO2PerKWh: number; heatwave?: Heatwave | null }): AnnualResult {
   const size = sizePlant(p);
-  const wbC = wetBulbSeries(w);
+  // Copies, so a heatwave never touches the cached weather and Clear restores the original year.
   const dbC = Float64Array.from(w.tempC);
+  const rh = Float64Array.from(w.rh);
+  const unitsOut = new Uint8Array(HOURS);
   if (opts.heatwave) {
-    // Heatwave test: add +X °C to both dry-bulb and wet-bulb for the chosen days.
+    // Heatwave test: +X °C dry-bulb with the humidity ratio held constant. At constant pressure that means
+    // constant vapour pressure, so RH = p_v / p_sat(DB + X); wet-bulb is then recomputed with Stull.
     const [a, b] = heatwaveHours(opts.heatwave);
     for (let h = a; h < b; h++) {
+      const pv = (rh[h] / 100) * psatKPa(dbC[h]);
       dbC[h] += opts.heatwave.deltaC;
-      wbC[h] += opts.heatwave.deltaC;
+      rh[h] = Math.min(100, (100 * pv) / psatKPa(dbC[h]));
+      if (opts.heatwave.unitOut) unitsOut[h] = 1;
     }
   }
+  const wbC = Float64Array.from(dbC, (t, i) => stullWetBulb(t, rh[i]));
   const loadKW = itLoadProfile(p, opts.spikes);
   return {
     size,
     wbC,
     dbC,
+    rh,
     loadKW,
-    baseline: runStrategy('baseline', wbC, dbC, loadKW, p, size, opts.gridKgCO2PerKWh),
-    smart: runStrategy('smart', wbC, dbC, loadKW, p, size, opts.gridKgCO2PerKWh),
+    baseline: runStrategy('baseline', wbC, dbC, unitsOut, loadKW, p, size, opts.gridKgCO2PerKWh),
+    smart: runStrategy('smart', wbC, dbC, unitsOut, loadKW, p, size, opts.gridKgCO2PerKWh),
   };
 }
 
@@ -151,23 +163,30 @@ export interface WindowStats {
   peakChillersOn: number;
   redundancyLostHours: number;
   ecwtOverLimitHours: number;
+  tripHours: number;
   peakEcwtC: number;
+  peakInletC: number;
+  inletOverLimitHours: number;
   peakWbC: number;
   mechMWh: number;
 }
 
 /** Stress metrics over hours [start, end). */
-export function windowStats(res: AnnualResult, run: StrategyRun, start: number, end: number, maxEcwtC: number): WindowStats {
-  const s: WindowStats = { capacityExceededHours: 0, maxUnmetKW: 0, supplyAboveSetpointHours: 0, peakSupplyC: -Infinity, peakCapUse: 0, peakPlr: 0, peakChillersOn: 0, redundancyLostHours: 0, ecwtOverLimitHours: 0, peakEcwtC: -Infinity, peakWbC: -Infinity, mechMWh: 0 };
+export function windowStats(res: AnnualResult, run: StrategyRun, start: number, end: number, p: Params): WindowStats {
+  const s: WindowStats = { capacityExceededHours: 0, maxUnmetKW: 0, supplyAboveSetpointHours: 0, peakSupplyC: -Infinity, peakCapUse: 0, peakPlr: 0, peakChillersOn: 0, redundancyLostHours: 0, ecwtOverLimitHours: 0, tripHours: 0, peakEcwtC: -Infinity, peakInletC: -Infinity, inletOverLimitHours: 0, peakWbC: -Infinity, mechMWh: 0 };
   for (let h = start; h < end; h++) {
     const r = run.hours[h];
     if (r.unmetKW > 1) s.capacityExceededHours++;
-    if (r.supplyC > r.chwsC + 0.05) s.supplyAboveSetpointHours++;
+    if (r.supplyC > r.chwsC + TEMP_TOL_K) s.supplyAboveSetpointHours++;
     if (r.nRequired > res.size.nDuty) s.redundancyLostHours++;
-    if (r.nChillers > 0) {
+    if (r.nChillers > 0 || r.tripped) {
       s.peakEcwtC = Math.max(s.peakEcwtC, r.ecwtC);
-      if (r.ecwtC > maxEcwtC) s.ecwtOverLimitHours++;
+      if (r.ecwtC > p.maxEcwtC) s.ecwtOverLimitHours++;
     }
+    if (r.tripped) s.tripHours++;
+    const inlet = r.supplyC + p.airSideApproachK;
+    s.peakInletC = Math.max(s.peakInletC, inlet);
+    if (inlet > p.maxServerInletC + TEMP_TOL_K) s.inletOverLimitHours++;
     s.maxUnmetKW = Math.max(s.maxUnmetKW, r.unmetKW);
     s.peakSupplyC = Math.max(s.peakSupplyC, r.supplyC);
     s.peakCapUse = Math.max(s.peakCapUse, r.capUse);

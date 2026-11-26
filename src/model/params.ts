@@ -28,6 +28,7 @@ export interface Params {
   plrC: number;
   designEcwtC: number;
   capDeratePerK: number;
+  chillerCapGainPerK: number;
   minCondWaterC: number;
   maxEcwtC: number;
   // Towers + economizer
@@ -68,6 +69,7 @@ export const DEFAULTS: Params = {
   plrC: 0.4637,
   designEcwtC: 29.4,
   capDeratePerK: 0.015,
+  chillerCapGainPerK: 0.03,
   minCondWaterC: 15.5,
   maxEcwtC: 40,
   towerApproachK: 4,
@@ -105,8 +107,9 @@ export const PARAM_INFO: Record<keyof Params, { label: string; unit: string; not
   plrC: { group: 'Chillers', label: 'Part-load curve c', unit: '–', note: 'Best efficiency near PLR ≈ 0.69.' },
   designEcwtC: { group: 'Chillers', label: 'Design entering CW temp', unit: '°C', note: '85 °F, AHRI 550/590 standard rating condition.' },
   capDeratePerK: { group: 'Chillers', label: 'Capacity derate', unit: '1/K', note: 'Capacity loss per K of ECWT above design.' },
+  chillerCapGainPerK: { group: 'Chillers', label: 'Capacity gain with CHW supply temp', unit: '1/K', note: 'Assumed. When capacity is short, CHW supply rises until capacity meets load: rise = (unmet / capacity) / this.' },
   minCondWaterC: { group: 'Chillers', label: 'Min condenser water', unit: '°C', note: 'Head-pressure floor for chiller ECWT (not applied to the economizer HX).' },
-  maxEcwtC: { group: 'Chillers', label: 'Max entering CW temp', unit: '°C', note: 'Flag only (≈104 °F). Hours above it are reported in the heatwave test; real chillers may trip on high head pressure there.' },
+  maxEcwtC: { group: 'Chillers', label: 'Max entering CW temp', unit: '°C', note: 'Assumed trip limit (≈104 °F): above it every chiller trips on high head pressure and capacity drops to zero.' },
   towerApproachK: { group: 'Towers & economizer', label: 'Tower approach', unit: 'K', note: 'Tower leaving water = wet-bulb + approach (fans modulate to hold it).' },
   freezeMinTowerC: { group: 'Towers & economizer', label: 'Min tower leaving water', unit: '°C', note: 'Freeze protection. In full free cooling the tower is held at CHWS − HX approach, never below this.' },
   hxApproachK: { group: 'Towers & economizer', label: 'Plate HX approach', unit: 'K', note: 'Economizer CHW leaving = tower water + this.' },
@@ -119,3 +122,12 @@ export const PARAM_INFO: Record<keyof Params, { label: string; unit: string; not
   latentHeatKJkg: { group: 'Water', label: 'Latent heat of vaporization', unit: 'kJ/kg', note: 'At ≈30 °C. Only sets the 0.5-1.5 × Q_rej / h_fg clamp on the air-side evaporation balance.' },
   cyclesOfConcentration: { group: 'Water', label: 'Cycles of concentration', unit: '–', note: 'Blowdown = evaporation / (COC − 1). Drift ignored.' },
 };
+
+/** Model assumptions that are not single numbers. Rendered in the UI assumptions table and listed in the README. */
+export const EXTRA_ASSUMPTIONS: { group: string; label: string; value: string; note: string }[] = [
+  { group: 'Heatwave', label: 'Heatwave weather', value: '+X °C dry-bulb', note: 'Humidity ratio held constant; RH and Stull wet-bulb recomputed from the new dry-bulb.' },
+  { group: 'Heatwave', label: 'N+1 unit out of service', value: 'option, default off', note: 'Removes one chiller for the heatwave window only.' },
+  { group: 'Heatwave', label: 'Chiller trip', value: 'ECWT > max', note: 'All chillers trip together (common cause); no restart delay or staged unloading is modelled.' },
+  { group: 'Heatwave', label: 'CHW supply when capacity is short', value: 'equilibrium rise', note: 'Running chillers: supply rises until capacity (gain per K above) meets load. All tripped: CHWS + ΔT·unmet/Q, a lower bound; the real loop keeps heating.' },
+  { group: 'Heatwave', label: 'Supply air / server inlet', value: 'CHW supply + approach', note: 'Uses the CHWS → inlet approach above; compared against the 27 °C ASHRAE limit.' },
+];

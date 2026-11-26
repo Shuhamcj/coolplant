@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULTS as P } from './params';
-import { stullWetBulb } from './psychro';
-import { affinityKW, chillerKW, economizerFraction, fullLoadCop, pumpDesignKW, simulateHour, sizePlant, towerEvaporationKgH } from './plant';
+import { humidityRatio, psatKPa, stullWetBulb } from './psychro';
+import { supplyTempC, affinityKW, chillerKW, economizerFraction, fullLoadCop, pumpDesignKW, simulateHour, sizePlant, towerEvaporationKgH } from './plant';
 import { itLoadProfile, simulateYear, windowStats, heatwaveHours, HOURS, MONTH_OF_HOUR } from './annual';
 import ashburn from '../data/weather/ashburn.json';
 import phoenix from '../data/weather/phoenix.json';
 import dublin from '../data/weather/dublin.json';
+import councilBluffs from '../data/weather/council-bluffs.json';
+import singapore from '../data/weather/singapore.json';
 
 const size = sizePlant(P);
 
@@ -164,28 +166,79 @@ describe('tower in free cooling', () => {
 describe('heatwave', () => {
   const hw = { deltaC: 8, days: 7, startDay: 195 };
   const [a, b] = heatwaveHours(hw);
-  const opts = { spikes: true, gridKgCO2PerKWh: 0.3 };
+  const opts = { spikes: false, gridKgCO2PerKWh: 0.3 };
   const base = simulateYear(ashburn, P, opts);
   const hot = simulateYear(ashburn, P, { ...opts, heatwave: hw });
-  it('adds +X to wet-bulb and dry-bulb only inside the window', () => {
-    expect(hot.wbC[a] - base.wbC[a]).toBeCloseTo(8, 6);
-    expect(hot.dbC[b - 1] - base.dbC[b - 1]).toBeCloseTo(8, 6);
+  it('adds +X to dry-bulb only, holds humidity ratio, and recomputes RH and wet-bulb', () => {
+    const w = (t: number, rh: number) => { const pv = (rh / 100) * psatKPa(t); return humidityRatio(pv); };
+    for (const h of [a, a + 13, b - 1]) {
+      expect(hot.dbC[h] - base.dbC[h]).toBeCloseTo(8, 6);
+      expect(hot.rh[h]).toBeLessThan(base.rh[h]);
+      expect(w(hot.dbC[h], hot.rh[h])).toBeCloseTo(w(base.dbC[h], base.rh[h]), 9);
+      expect(hot.wbC[h]).toBeGreaterThan(base.wbC[h]);
+      expect(hot.wbC[h] - base.wbC[h]).toBeLessThan(8); // wet-bulb rises less than dry-bulb at constant w
+    }
+    expect(hot.dbC[b]).toBe(base.dbC[b]);
     expect(hot.wbC[b]).toBe(base.wbC[b]);
   });
-  it('flat load at +8 °C: N+1 absorbs it, but the standby chiller is needed (redundancy lost)', () => {
-    const flat = simulateYear(ashburn, P, { spikes: false, gridKgCO2PerKWh: 0.3, heatwave: hw });
-    const s = windowStats(flat, flat.baseline, a, b, P.maxEcwtC);
-    expect(s.capacityExceededHours).toBe(0);
-    expect(s.redundancyLostHours).toBeGreaterThan(0);
+  it('wet-bulb never exceeds dry-bulb, in any city, with or without a heatwave', () => {
+    for (const w of [ashburn, phoenix, councilBluffs, dublin, singapore]) {
+      for (const r of [simulateYear(w, P, opts), simulateYear(w, P, { ...opts, heatwave: { deltaC: 12, days: 14, startDay: 190 } })]) {
+        r.wbC.forEach((wb, h) => expect(wb).toBeLessThanOrEqual(r.dbC[h]));
+      }
+    }
   });
-  it('AI spikes + 8 °C heatwave exceed derated N+1 capacity and lift CHW supply above setpoint', () => {
-    const s0 = windowStats(base, base.baseline, a, b, P.maxEcwtC);
-    const s1 = windowStats(hot, hot.baseline, a, b, P.maxEcwtC);
-    expect(s1.peakCapUse).toBeGreaterThan(s0.peakCapUse);
-    expect(s0.capacityExceededHours).toBe(0);
-    expect(s1.capacityExceededHours).toBeGreaterThan(0);
-    expect(s1.supplyAboveSetpointHours).toBe(s1.capacityExceededHours);
-    expect(s1.peakSupplyC).toBeGreaterThan(P.baselineChwsC);
+  it('with all N+1 units available, the plant rides through +8 °C', () => {
+    expect(windowStats(hot, hot.baseline, a, b, P).capacityExceededHours).toBe(0);
+  });
+  it('with the N+1 unit out of service, the same heatwave exceeds capacity and CHW supply rises', () => {
+    const out = simulateYear(ashburn, P, { ...opts, heatwave: { ...hw, unitOut: true } });
+    const s = windowStats(out, out.baseline, a, b, P);
+    expect(s.capacityExceededHours).toBeGreaterThan(0);
+    // Supply counts as above setpoint past a 0.05 K deadband, so tiny shortfalls may not register.
+    expect(s.supplyAboveSetpointHours).toBeGreaterThan(0);
+    expect(s.supplyAboveSetpointHours).toBeLessThanOrEqual(s.capacityExceededHours);
+    expect(s.peakSupplyC).toBeGreaterThan(P.baselineChwsC);
+    expect(s.peakInletC).toBeGreaterThan(P.baselineChwsC + P.airSideApproachK);
+    expect(s.peakChillersOn).toBe(size.nInstalled - 1);
+    // Outside the window all units are back.
+    expect(out.baseline.hours[b].nAvailable).toBe(size.nInstalled);
+  });
+  it('short capacity with chillers running: supply settles where capacity (+3 %/K) meets load', () => {
+    expect(supplyTempC(20, 10000, 0, 9000, P)).toBe(20);
+    expect(supplyTempC(20, 10000, 300, 9700, P)).toBeCloseTo(20 + 300 / 9700 / 0.03, 9); // ≈ +1.03 K
+    expect(supplyTempC(7, 10000, 10000, 0, P)).toBeCloseTo(7 + 6, 9); // all tripped: lower bound CHWS + ΔT
+  });
+  it('server-inlet and CHW-supply hour counts match when Smart CHWS + 7 K = 27 °C (shared tolerance)', () => {
+    expect(P.smartChwsC + P.airSideApproachK).toBe(P.maxServerInletC);
+    const hw14 = { deltaC: 12, days: 14, startDay: 195, unitOut: true };
+    const [s0, s1] = heatwaveHours(hw14);
+    for (const w of [ashburn, singapore]) {
+      const r = simulateYear(w, P, { ...opts, heatwave: hw14 });
+      const st = windowStats(r, r.smart, s0, s1, P);
+      expect(st.supplyAboveSetpointHours).toBeGreaterThan(0);
+      expect(st.inletOverLimitHours).toBe(st.supplyAboveSetpointHours);
+    }
+  });
+  it('ECWT above 40 °C trips the chillers: capacity drops to zero and CHW supply rises', () => {
+    const ok = simulateHour(35, 10000, 'baseline', P, size); // ECWT ≈ 39 °C
+    expect(ok.tripped).toBe(false);
+    expect(ok.nChillers).toBeGreaterThan(0);
+    const trip = simulateHour(37, 10000, 'baseline', P, size); // ECWT ≈ 41 °C
+    expect(trip.ecwtC).toBeGreaterThan(P.maxEcwtC);
+    expect(trip.tripped).toBe(true);
+    expect(trip.nChillers).toBe(0);
+    expect(trip.chillerKW).toBe(0);
+    expect(trip.unmetKW).toBeCloseTo(10000 + trip.chwPumpKW, 6);
+    expect(trip.supplyC).toBeCloseTo(P.baselineChwsC + P.chwDeltaTK, 6);
+  });
+  it('Clear restores the original annual totals (heatwave does not mutate cached weather)', () => {
+    const before = JSON.stringify(ashburn);
+    simulateYear(ashburn, P, { ...opts, heatwave: { ...hw, unitOut: true } });
+    expect(JSON.stringify(ashburn)).toBe(before);
+    const again = simulateYear(ashburn, P, opts);
+    expect(again.baseline.totals).toEqual(base.baseline.totals);
+    expect(again.smart.totals).toEqual(base.smart.totals);
   });
 });
 

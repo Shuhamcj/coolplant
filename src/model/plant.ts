@@ -121,10 +121,19 @@ export interface HourResult {
   waterL: number;
   unmetKW: number;
   atCopLimit: boolean;
+  /** Chillers tripped on high entering condenser water (ECWT > maxEcwtC). */
+  tripped: boolean;
+  /** Chillers available this hour (installed − out of service, 0 if tripped). */
+  nAvailable: number;
+  /** Capacity of the running chillers at setpoint, kW. */
+  chCapKW: number;
 }
 
-/** One steady-state plant hour. dbC defaults to wbC (saturated air) so callers without dry-bulb still work. */
-export function simulateHour(wbC: number, loadKW: number, strategy: Strategy, p: Params, size: PlantSize, dbC = wbC): HourResult {
+/**
+ * One steady-state plant hour. dbC defaults to wbC (saturated air) so callers without dry-bulb still work.
+ * unitsOut removes chillers from service (heatwave "N+1 unit out of service" option).
+ */
+export function simulateHour(wbC: number, loadKW: number, strategy: Strategy, p: Params, size: PlantSize, dbC = wbC, unitsOut = 0): HourResult {
   const smart = strategy === 'smart';
   const chwsC = smart ? p.smartChwsC : p.baselineChwsC;
 
@@ -135,11 +144,11 @@ export function simulateHour(wbC: number, loadKW: number, strategy: Strategy, p:
   // Tower: first guess at design approach; if rejection exceeds design, approach grows (fans already at 100%).
   // One fixed-point pass is enough because rejection depends only weakly on approach.
   let approach = p.towerApproachK;
-  let r = solveChillers(wbC, coolKW, chwsC, approach, smart, p, size);
+  let r = solveChillers(wbC, coolKW, chwsC, approach, smart, p, size, unitsOut);
   let rejRatio = r.heatRejKW / size.designRejKW;
   if (rejRatio > 1) {
     approach = p.towerApproachK * rejRatio;
-    r = solveChillers(wbC, coolKW, chwsC, approach, smart, p, size);
+    r = solveChillers(wbC, coolKW, chwsC, approach, smart, p, size, unitsOut);
     rejRatio = r.heatRejKW / size.designRejKW;
   }
 
@@ -157,7 +166,7 @@ export function simulateHour(wbC: number, loadKW: number, strategy: Strategy, p:
   return {
     ...r,
     chwsC,
-    supplyC: chwsC + (p.chwDeltaTK * r.unmetKW) / coolKW,
+    supplyC: supplyTempC(chwsC, coolKW, r.unmetKW, r.chCapKW, p),
     chwPumpKW,
     cwPumpKW,
     fanKW,
@@ -168,7 +177,20 @@ export function simulateHour(wbC: number, loadKW: number, strategy: Strategy, p:
   };
 }
 
-function solveChillers(wbC: number, loadKW: number, chwsC: number, approachK: number, smart: boolean, p: Params, size: PlantSize) {
+/**
+ * CHW supply temperature when chillers cannot hold setpoint.
+ * Running chillers: the loop warms until their capacity, which rises by chillerCapGainPerK per K of
+ * leaving CHW temperature (assumed), meets the load: rise = (unmet / capacity) / gain.
+ * No chillers running (tripped or none available): no equilibrium exists; we report the steady-state
+ * lower bound CHWS + ΔT · unmet / Q_cool. A real loop keeps heating within minutes.
+ */
+export function supplyTempC(chwsC: number, coolKW: number, unmetKW: number, chCapKW: number, p: Params): number {
+  if (unmetKW <= 0) return chwsC;
+  const lowerBound = chwsC + (p.chwDeltaTK * unmetKW) / coolKW;
+  return chCapKW > 0 ? Math.max(lowerBound, chwsC + unmetKW / chCapKW / p.chillerCapGainPerK) : lowerBound;
+}
+
+function solveChillers(wbC: number, loadKW: number, chwsC: number, approachK: number, smart: boolean, p: Params, size: PlantSize, unitsOut: number) {
   const econFrac = smart ? economizerFraction(wbC, chwsC, p, approachK) : 0;
   const mode: Mode = econFrac >= 1 ? 'free' : econFrac > 0 ? 'partial' : 'chiller';
   // Tower leaving water: full free cooling holds CHWS − HX approach; partial runs as cold as possible;
@@ -184,7 +206,11 @@ function solveChillers(wbC: number, loadKW: number, chwsC: number, approachK: nu
   const unitCap = p.chillerUnitKW * (1 - p.capDeratePerK * Math.max(0, ecwtC - p.designEcwtC));
   const copFull = fullLoadCop(chwsC, ecwtC, p);
   const nRequired = chLoad > 0 ? Math.ceil(chLoad / unitCap) : 0;
-  const nMin = Math.min(size.nInstalled, nRequired);
+  // Assumed: above the max entering condenser water temperature every chiller trips on high head pressure.
+  const tripped = chLoad > 0 && ecwtC > p.maxEcwtC;
+  const inService = Math.max(0, size.nInstalled - unitsOut);
+  const nAvailable = tripped ? 0 : inService;
+  const nMin = Math.min(nAvailable, nRequired);
 
   // Baseline: stage by load only (fewest chillers that carry the load).
   // Smart: try every count from nMin up to the allowed maximum and keep the lowest kW.
@@ -192,7 +218,7 @@ function solveChillers(wbC: number, loadKW: number, chwsC: number, approachK: nu
   let n = nMin;
   let kw = chillerKW(Math.min(chLoad, n * unitCap), n, unitCap, copFull, p);
   if (smart) {
-    const nMax = p.smartKeepStandby ? Math.max(size.nDuty, nMin) : size.nInstalled;
+    const nMax = p.smartKeepStandby ? Math.max(Math.min(size.nDuty, nAvailable), nMin) : nAvailable;
     for (let k = nMin + 1; k <= nMax && nMin > 0; k++) {
       const kwK = chillerKW(chLoad, k, unitCap, copFull, p);
       if (kwK < kw) [n, kw] = [k, kwK];
@@ -207,10 +233,13 @@ function solveChillers(wbC: number, loadKW: number, chwsC: number, approachK: nu
     nChillers: n,
     nRequired,
     plr: n ? served / (n * unitCap) : 0,
-    capUse: chLoad / (size.nInstalled * unitCap),
+    capUse: inService ? chLoad / (inService * unitCap) : Infinity, // vs units in service (before any trip)
     chillerKW: kw,
     heatRejKW: loadKW * econFrac + served + kw,
     unmetKW: chLoad - served,
+    chCapKW: n * unitCap,
     atCopLimit: n > 0 && copFull >= p.copMax,
+    tripped,
+    nAvailable,
   };
 }

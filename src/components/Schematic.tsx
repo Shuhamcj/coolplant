@@ -127,7 +127,7 @@ export function Schematic({ hr, size, loadKW, wbC, dbC, p }: { hr: HourResult; s
       <rect x={30} y={262} width={200} height={70} rx={6} fill="#f8fafc" stroke="#475569" strokeWidth={2} />
       <text x={130} y={290} textAnchor="middle" className="fill-slate-800 text-[12px] font-semibold">Data hall</text>
       <text x={130} y={308} textAnchor="middle" className="fill-slate-600 text-[11px]">IT {fmt(loadKW)} kW</text>
-      <text x={130} y={324} textAnchor="middle" className="fill-slate-500 text-[10px]">server inlet ≈ {(hr.supplyC + p.airSideApproachK).toFixed(0)} °C</text>
+      <text x={130} y={324} textAnchor="middle" className="fill-slate-500 text-[10px]">supply air ≈ {(hr.supplyC + p.airSideApproachK).toFixed(1)} °C (CHW + {p.airSideApproachK} K)</text>
       <text x={420} y={284} textAnchor="middle" className="fill-orange-600 text-[11px]">CHW return {(hr.supplyC + p.chwDeltaTK).toFixed(1)} °C</text>
       <text x={420} y={326} textAnchor="middle" className="fill-blue-600 text-[11px]">
         CHW supply {hr.supplyC.toFixed(1)} °C{hr.supplyC > hr.chwsC + 0.05 ? ` (setpoint ${hr.chwsC.toFixed(1)})` : ''}

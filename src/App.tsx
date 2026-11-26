@@ -5,7 +5,7 @@ import phoenix from './data/weather/phoenix.json';
 import councilBluffs from './data/weather/council-bluffs.json';
 import dublin from './data/weather/dublin.json';
 import singapore from './data/weather/singapore.json';
-import { DEFAULTS, PARAM_INFO, type Params } from './model/params';
+import { DEFAULTS, EXTRA_ASSUMPTIONS, PARAM_INFO, type Params } from './model/params';
 import { simulateYear, windowStats, heatwaveHours, L_PER_GAL, type Heatwave } from './model/annual';
 import { Schematic } from './components/Schematic';
 import type { Strategy } from './model/plant';
@@ -60,7 +60,7 @@ export default function App() {
   const { city, res: normal } = all.find((x) => x.city.id === cityId)!;
   const weather = WEATHER[cityId];
   // Heatwave test: controls stage a scenario; Apply re-runs the selected city with it (comparison table stays on normal weather).
-  const [hwDraft, setHwDraft] = useState<Heatwave>({ deltaC: 5, days: 5, startDay: 195 });
+  const [hwDraft, setHwDraft] = useState<Heatwave>({ deltaC: 5, days: 5, startDay: 195, unitOut: false });
   const [hw, setHw] = useState<Heatwave | null>(null);
   const hot = useMemo(() => (hw ? simulateYear(weather, p, { spikes, gridKgCO2PerKWh: city.gridKgCO2PerKWh, heatwave: hw }) : null), [hw, weather, p, spikes, city]);
   const res = hot ?? normal;
@@ -152,7 +152,7 @@ export default function App() {
         <input type="range" min={0} max={8759} value={hour} onChange={(e) => setHour(+e.target.value)} className="w-full accent-teal-600" />
         <div className="mt-2 grid grid-cols-2 gap-x-6 gap-y-1 text-sm md:grid-cols-4">
           <div><span className="text-slate-500">Time:</span> {hourLabel(hour)}</div>
-          <div><span className="text-slate-500">Dry-bulb / RH:</span> {weather.tempC[hour].toFixed(1)} °C / {weather.rh[hour]}%</div>
+          <div><span className="text-slate-500">Dry-bulb / RH:</span> {res.dbC[hour].toFixed(1)} °C / {res.rh[hour].toFixed(0)}%{hot && res.dbC[hour] !== weather.tempC[hour] ? ' (heatwave)' : ''}</div>
           <div><span className="text-slate-500">Wet-bulb (Stull):</span> {res.wbC[hour].toFixed(1)} °C</div>
           <div><span className="text-slate-500">Mode:</span> <b style={{ color: MODE_COLOR[hr.mode] }}>{MODE_LABEL[hr.mode]}</b> ({fmt(hr.econFrac * 100)}% by HX)</div>
           <div><span className="text-slate-500">CHWS / chiller ECWT:</span> {hr.supplyC.toFixed(1)} / {hr.nChillers > 0 ? `${hr.ecwtC.toFixed(1)} °C` : '–'}</div>
@@ -173,7 +173,7 @@ export default function App() {
         <Schematic hr={hr} size={res.size} loadKW={res.loadKW[hour]} wbC={res.wbC[hour]} dbC={res.dbC[hour]} p={p} />
       </Panel>
 
-      <Panel title="Heatwave test" note={`Adds +X °C to dry-bulb and wet-bulb for N days, for ${city.name} only. Stress metrics compare the same window with and without the heatwave.`}>
+      <Panel title="Heatwave test" note={`Adds +X °C to dry-bulb for N days with the humidity ratio held constant, then recomputes RH and wet-bulb (assumed). ${city.name} only. Metrics compare the same window with and without the heatwave.`}>
         <div className="flex flex-wrap items-end gap-6 text-sm">
           <label className="w-48">+{hwDraft.deltaC} °C
             <input type="range" min={1} max={12} value={hwDraft.deltaC} onChange={(e) => setHwDraft({ ...hwDraft, deltaC: +e.target.value })} className="w-full accent-red-600" /></label>
@@ -181,25 +181,31 @@ export default function App() {
             <input type="range" min={1} max={14} value={hwDraft.days} onChange={(e) => setHwDraft({ ...hwDraft, days: +e.target.value })} className="w-full accent-red-600" /></label>
           <label className="w-56">Start: {hourLabel(hwDraft.startDay * 24).split(',')[0]}
             <input type="range" min={0} max={364 - hwDraft.days + 1} value={hwDraft.startDay} onChange={(e) => setHwDraft({ ...hwDraft, startDay: +e.target.value })} className="w-full accent-red-600" /></label>
+          <label className="flex items-center gap-2">
+            <input type="checkbox" checked={!!hwDraft.unitOut} onChange={(e) => setHwDraft({ ...hwDraft, unitOut: e.target.checked })} className="accent-red-600" />
+            N+1 unit out of service
+          </label>
           <button onClick={() => { setHw(hwDraft); setHour(hwDraft.startDay * 24 + 15); }} className="rounded bg-red-600 px-3 py-1 text-white">Apply heatwave</button>
           {hw && <button onClick={() => setHw(null)} className="rounded border border-slate-300 px-3 py-1">Clear</button>}
         </div>
         {hw && hot && (() => {
           const [a, z] = heatwaveHours(hw);
           const cols = (['baseline', 'smart'] as const).flatMap((k) => [
-            { k: `${k === 'baseline' ? 'Baseline' : 'Smart'} normal`, s: windowStats(normal, normal[k], a, z, p.maxEcwtC) },
-            { k: `${k === 'baseline' ? 'Baseline' : 'Smart'} +${hw.deltaC} °C`, s: windowStats(hot, hot[k], a, z, p.maxEcwtC) },
+            { k: `${k === 'baseline' ? 'Baseline' : 'Smart'} normal`, s: windowStats(normal, normal[k], a, z, p) },
+            { k: `${k === 'baseline' ? 'Baseline' : 'Smart'} +${hw.deltaC} °C${hw.unitOut ? ', N+1 out' : ''}`, s: windowStats(hot, hot[k], a, z, p) },
           ]);
           const rows: [string, (s: (typeof cols)[0]['s']) => string][] = [
             ['Peak wet-bulb (°C)', (s) => s.peakWbC.toFixed(1)],
             ['Plant capacity exceeded (h)', (s) => String(s.capacityExceededHours)],
             ['Max unmet load (kW)', (s) => fmt(s.maxUnmetKW)],
             ['Hours CHW supply above setpoint', (s) => String(s.supplyAboveSetpointHours)],
-            ['Peak CHW supply (°C)', (s) => s.peakSupplyC.toFixed(1)],
-            ['Peak chiller loading (% of derated N+1)', (s) => fmt(s.peakCapUse * 100)],
+            ['Peak CHW supply (°C)', (s) => s.peakSupplyC.toFixed(2)],
+            [`Peak supply air / server inlet (°C, limit ${p.maxServerInletC})`, (s) => s.peakInletC.toFixed(1)],
+            [`Hours server inlet > ${p.maxServerInletC} °C`, (s) => String(s.inletOverLimitHours)],
+            ['Peak chiller loading (% of derated capacity in service)', (s) => fmt(s.peakCapUse * 100)],
             ['Peak PLR / chillers on', (s) => `${s.peakPlr.toFixed(2)} / ${s.peakChillersOn}`],
             [`Hours standby chiller needed (> ${res.size.nDuty} required)`, (s) => String(s.redundancyLostHours)],
-            [`Hours ECWT > ${p.maxEcwtC} °C (chiller limit flag)`, (s) => String(s.ecwtOverLimitHours)],
+            [`Peak ECWT (°C) / hours chillers tripped (> ${p.maxEcwtC} °C)`, (s) => `${Number.isFinite(s.peakEcwtC) ? s.peakEcwtC.toFixed(1) : '–'} / ${s.tripHours}`],
             ['Plant energy in window (MWh)', (s) => fmt(s.mechMWh, 1)],
           ];
           return (
@@ -215,7 +221,7 @@ export default function App() {
         <Panel title="Monthly plant energy" note="Chillers + CHW/CW pumps + tower fans">
           <MonthlyBars res={res} metric="mechMWh" />
         </Panel>
-        <Panel title="Monthly makeup water" note="Evaporation (Q_rej / h_fg) + blowdown">
+        <Panel title="Monthly makeup water" note={`Evaporation from an air-side tower balance (exit air assumed saturated at mean water temp) + blowdown at COC ${p.cyclesOfConcentration}`}>
           <MonthlyBars res={res} metric="waterKGal" />
         </Panel>
       </div>
@@ -278,6 +284,11 @@ export default function App() {
                 <td>{PARAM_INFO[k].label}</td>
                 <td className="tabular-nums">{String(p[k])} {PARAM_INFO[k].unit}</td>
                 <td className="text-slate-500">{PARAM_INFO[k].note}</td>
+              </tr>
+            ))}
+            {EXTRA_ASSUMPTIONS.map((x) => (
+              <tr key={x.label} className="border-t border-slate-100">
+                <td className="py-1 text-slate-500">{x.group}</td><td>{x.label}</td><td>{x.value}</td><td className="text-slate-500">{x.note}</td>
               </tr>
             ))}
             <tr className="border-t border-slate-100">
