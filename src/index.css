@@ -1,0 +1,8 @@
+@import "tailwindcss";
+
+/* Plant schematic animation: pipe flow dashes and tower fans */
+@keyframes flow { to { stroke-dashoffset: -32; } }
+@keyframes spin { to { transform: rotate(360deg); } }
+.flow { animation: flow linear infinite; }
+.spin { animation: spin linear infinite; transform-box: fill-box; transform-origin: center; }
+@media (prefers-reduced-motion: reduce) { .flow, .spin { animation: none; } }

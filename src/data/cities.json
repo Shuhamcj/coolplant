@@ -1,0 +1,7 @@
+[
+  { "id": "ashburn", "name": "Ashburn, VA", "lat": 39.0438, "lon": -77.4874, "timezone": "America/New_York", "gridKgCO2PerKWh": 0.30, "gridSource": "approx. eGRID SRVC subregion (Dominion/PJM), assumed" },
+  { "id": "phoenix", "name": "Phoenix, AZ", "lat": 33.4484, "lon": -112.074, "timezone": "America/Phoenix", "gridKgCO2PerKWh": 0.37, "gridSource": "approx. eGRID AZNM subregion, assumed" },
+  { "id": "council-bluffs", "name": "Council Bluffs, IA", "lat": 41.2619, "lon": -95.8608, "timezone": "America/Chicago", "gridKgCO2PerKWh": 0.43, "gridSource": "approx. eGRID MROW subregion, assumed" },
+  { "id": "dublin", "name": "Dublin, Ireland", "lat": 53.3498, "lon": -6.2603, "timezone": "Europe/Dublin", "gridKgCO2PerKWh": 0.26, "gridSource": "approx. Irish grid average, assumed" },
+  { "id": "singapore", "name": "Singapore", "lat": 1.3521, "lon": 103.8198, "timezone": "Asia/Singapore", "gridKgCO2PerKWh": 0.41, "gridSource": "approx. Singapore grid emission factor, assumed" }
+]
